@@ -1,24 +1,4 @@
 services:
-  caddy:
-    image: caddy:2.10.0
-    container_name: caddy
-    restart: unless-stopped
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp" # Needed for HTTP/3
-    volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile # Mount Caddy config file
-      - caddy_data:/data # Mount persistent data volume for certs etc.
-      - caddy_config:/config # Mount persistent config volume
-    environment:
-      # Pass domain name for use in Caddyfile
-      # Email is configured via Caddyfile global options
-      - DOMAIN_NAME=${DOMAIN_NAME}
-    depends_on:
-      - backend
-      - client
-
   clickhouse:
     container_name: clickhouse
     image: clickhouse/clickhouse-server:25.4.2
@@ -38,12 +18,22 @@ services:
       - CLICKHOUSE_USER=${CLICKHOUSE_USER:-default}
       - CLICKHOUSE_PASSWORD=${CLICKHOUSE_PASSWORD:-frog}
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8123/ping",
+        ]
       interval: 3s
       timeout: 5s
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    labels:
+      - traefik.enable=false
 
   postgres:
     image: postgres:17.4
@@ -61,15 +51,12 @@ services:
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    labels:
+      - traefik.enable=false
 
   backend:
     image: ghcr.io/rybbit-io/rybbit-backend:${IMAGE_TAG:-latest}
     container_name: backend
-    build:
-      context: .
-      dockerfile: server/Dockerfile
-    ports:
-      - "${HOST_BACKEND_PORT:-127.0.0.1:3001:3001}"
     environment:
       - NODE_ENV=production
       - CLICKHOUSE_HOST=http://clickhouse:8123
@@ -82,6 +69,7 @@ services:
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-frog}
       - BETTER_AUTH_SECRET=${BETTER_AUTH_SECRET}
       - BASE_URL=${BASE_URL}
+      - DOMAIN_NAME=${DOMAIN_NAME}
       - DISABLE_SIGNUP=${DISABLE_SIGNUP}
       - DISABLE_TELEMETRY=${DISABLE_TELEMETRY}
       - MAPBOX_TOKEN=${MAPBOX_TOKEN}
@@ -91,38 +79,56 @@ services:
       postgres:
         condition: service_started
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:3001/api/health"]
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://127.0.0.1:3001/api/health",
+        ]
       interval: 3s
       timeout: 5s
       retries: 5
       start_period: 10s
     restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.rybbit-backend.entrypoints=https
+      - traefik.http.routers.rybbit-backend.tls=true
+      - traefik.http.routers.rybbit-backend.rule=Host(`${DOMAIN_NAME}`) && (Path(`/api`) || PathPrefix(`/api/`))
+      - traefik.http.services.rybbit-backend.loadbalancer.server.port=3001
+      - traefik.http.routers.rybbit-backend.priority=100
+      - traefik.http.middlewares.rybbit-forward-headers.headers.customrequestheaders.X-Forwarded-Proto=https
+      - traefik.http.middlewares.rybbit-forward-headers.headers.customrequestheaders.X-Forwarded-Host=${DOMAIN_NAME}
+      - traefik.http.routers.rybbit-backend.middlewares=rybbit-forward-headers
 
   client:
     image: ghcr.io/rybbit-io/rybbit-client:${IMAGE_TAG:-latest}
     container_name: client
-    build:
-      context: .
-      dockerfile: client/Dockerfile
-      args:
-        NEXT_PUBLIC_BACKEND_URL: ${BASE_URL}
-        NEXT_PUBLIC_DISABLE_SIGNUP: ${DISABLE_SIGNUP}
-    ports:
-      - "${HOST_CLIENT_PORT:-127.0.0.1:3002:3002}"
     environment:
       - NODE_ENV=production
       - NEXT_PUBLIC_BACKEND_URL=${BASE_URL}
       - NEXT_PUBLIC_DISABLE_SIGNUP=${DISABLE_SIGNUP}
+      - DOMAIN_NAME=${DOMAIN_NAME}
     depends_on:
       - backend
     restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=coolify
+      - traefik.http.routers.rybbit-client.entrypoints=https
+      - traefik.http.routers.rybbit-client.tls=true
+      - traefik.http.routers.rybbit-client.rule=Host(`${DOMAIN_NAME}`)
+      - traefik.http.services.rybbit-client.loadbalancer.server.port=3002
+      - traefik.http.routers.rybbit-client.priority=10
 
 volumes:
   clickhouse-data:
   postgres-data:
   redis-data:
-  caddy_data: # Persistent volume for Caddy's certificates and state
-  caddy_config: # Persistent volume for Caddy's configuration cache (optional but good practice)
 
 configs:
   clickhouse_network:
